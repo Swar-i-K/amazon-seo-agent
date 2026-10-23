@@ -1,0 +1,27 @@
+# ------------------------------------------------------------------
+# SEO Agent: Rank Math-aware SEO for articles you ALREADY have.
+# It never rewrites or publishes your article. It produces the SEO fields,
+# fixes and extras for you to apply.
+# ------------------------------------------------------------------
+site:
+  name: "Summer Section"
+  domain: ""            # e.g. https://yoursite.com : lets the agent tell internal from external links in HTML files
+
+llm:
+  model: "openai/gpt-oss-120b"     # same free Groq model as your other agents
+  max_tokens: 6000
+
+rank_math:
+  title_max_chars: 60       # conservative: Rank Math really measures pixel width, check its preview
+  meta_max_chars: 160
+  meta_min_chars: 110
+  min_words: 600
+  secondary_keywords: 3     # Rank Math allows 5 focus keywords in total (1 primary + up to 4)
+
+faq_count: 5
+
+extras:                     # optional, set false to skip
+  pinterest: true           # 3 pin concepts
+  facebook: true            # 3 post concepts
+
+keywords_file: "keywords.csv"   # optional: keyword ideas (the research agent writes this file). Without it, free Google autocomplete is used
