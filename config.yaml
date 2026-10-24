@@ -1,27 +1,28 @@
 # ------------------------------------------------------------------
-# SEO Agent: Rank Math-aware SEO for articles you ALREADY have.
-# It never rewrites or publishes your article. It produces the SEO fields,
-# fixes and extras for you to apply.
+# SEO Optimizer for Rank Math. Takes an article you already have and returns an OPTIMIZED COPY:
+# corrected H1/H2/H3 structure, keywords placed and density tuned to your target, plus the Rank Math fields
+# (focus + secondary keywords, SEO title, slug, meta description) and a search-intent / topical-coverage review.
+# Your original file is never changed. Images, tables and links are not optimized, but they are kept.
 # ------------------------------------------------------------------
 site:
   name: "Summer Section"
-  domain: ""            # e.g. https://yoursite.com : lets the agent tell internal from external links in HTML files
+  domain: ""
 
 llm:
-  model: "openai/gpt-oss-120b"     # same free Groq model as your other agents
+  model: "openai/gpt-oss-120b"
   max_tokens: 6000
 
+seo:
+  density_target: 1.7        # % of words that are your focus + secondary keywords (exact phrase matches)
+  density_tolerance: 0.2     # accepted band: target +/- this
+  max_edit_rounds: 3         # how many times the agent retries the keyword edits to reach the target
+  similarity_min: 0.6        # a rewritten paragraph must keep this much of its original content words
+  grammar: false             # true = also fix spelling/grammar/punctuation (nothing else is reworded)
+  skip_tests: [images, links]   # test families left out of the checklist (you do not want them optimized)
+
 rank_math:
-  title_max_chars: 60       # conservative: Rank Math really measures pixel width, check its preview
+  title_max_chars: 60        # conservative: Rank Math measures pixel width, check its preview
   meta_max_chars: 160
   meta_min_chars: 110
   min_words: 600
-  secondary_keywords: 3     # Rank Math allows 5 focus keywords in total (1 primary + up to 4)
-
-faq_count: 5
-
-extras:                     # optional, set false to skip
-  pinterest: true           # 3 pin concepts
-  facebook: true            # 3 post concepts
-
-keywords_file: "keywords.csv"   # optional: keyword ideas (the research agent writes this file). Without it, free Google autocomplete is used
+  secondary_keywords: 3      # used when you give none and the agent suggests some (Rank Math allows 5 keywords in total)

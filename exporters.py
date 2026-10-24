@@ -1,21 +1,20 @@
 """
 exporters.py
 ------------
-Per-article output under output/<slug>/:
+Per article, under output/<article>/:
 
-  rank_math_fields.md   copy-paste block for the Rank Math panel (focus keywords, title, permalink, description)
-  seo_report.md         the full report: Rank Math checklist, fixes, keyword map, links, FAQs, table, social
-  faq.html              FAQ text for the Rank Math FAQ block (or a plain HTML fallback)
-  comparison_table.html table for a Custom HTML block (only when the article supports one)
-  internal_links.csv    link suggestions
-  social.md             Pinterest + Facebook concepts (only if enabled)
-  seo_package.json      everything, machine-readable
+  optimized_article.<docx|html|md>  your article with corrected headings, keywords placed and density tuned (written by main.py)
+  rank_math_fields.md               copy-paste: focus + secondary keywords, SEO title, permalink, meta description
+  heading_structure.md              the H1/H2/H3 structure before and after
+  topical_coverage.md               search intent, what searchers expect, which topics your article covers or misses
+  changes.md                        every changed paragraph, before and after (so nothing is a surprise)
+  seo_report.md                     summary, keyword usage by category, Rank Math checklist before / after
+  seo_package.json                  everything, machine-readable
 """
 from __future__ import annotations
 
-import csv
-import html
 import json
+import re
 from pathlib import Path
 
 import checks
@@ -23,174 +22,192 @@ import checks
 ICON = {"pass": "PASS", "warn": "WARN", "fail": "FAIL", "n/a": "n/a"}
 
 
-def focus_keyword_field(primary: str, secondary: list) -> str:
-    return ", ".join([primary] + list(secondary))      # Rank Math: first = primary, up to 5 total
+def mark(text: str, kws: list) -> str:
+    spans = []
+    for k in sorted({k for k in kws if k}, key=lambda k: -len(k)):
+        pat = r"(?<![A-Za-z0-9])" + r"[\s-]+".join(re.escape(w) for w in k.split()) + r"(?![A-Za-z0-9])"
+        for m in re.finditer(pat, text, re.I):
+            if not any(m.start() < e and m.end() > s for s, e in spans):
+                spans.append((m.start(), m.end()))
+    out, last = [], 0
+    for s, e in sorted(spans):
+        out += [text[last:s], "**", text[s:e], "**"]
+        last = e
+    out.append(text[last:])
+    return "".join(out)
 
 
-def rank_math_fields_md(art, primary, core, cfg) -> str:
-    sec = core.get("secondary_keywords", []) if core else []
-    lines = [f"# Rank Math fields: {art.title or Path(art.path).name}", "",
-             "Paste these into the Rank Math panel of the existing post.", "",
-             "**Focus Keyword(s)** (first is primary):", "", "```", focus_keyword_field(primary, sec), "```", ""]
-    if core and core.get("seo_title"):
-        lines += ["**SEO Title:**", "", "```", core["seo_title"], "```", f"({len(core['seo_title'])} characters)", ""]
-    if core and core.get("meta_description"):
-        lines += ["**Meta Description:**", "", "```", core["meta_description"], "```",
-                  f"({len(core['meta_description'])} characters)", ""]
-    if core and core.get("slug"):
-        lines += ["**Permalink (slug):**", "", "```", core["slug"], "```",
-                  "If this post is already published, keep its current URL unless you also add a redirect. "
-                  "Changing a live URL without a redirect loses its links and rankings.", ""]
-    lines += ["**Rank Math preview:** check the title and description in Rank Math's snippet preview. "
-              "It measures pixel width, which can differ from character counts."]
-    return "\n".join(lines) + "\n"
+def all_kws(kw: dict) -> list:
+    return [kw["focus"]] + kw["secondary"] + kw["semantic"]
 
 
-def faq_html(faqs: list) -> str:
-    out = ["<!-- Use Rank Math's FAQ block in the editor and paste each question/answer into it.",
-           "     Rank Math then adds the FAQ schema itself. Do NOT also paste JSON-LD: duplicate schema. -->"]
-    for f in faqs:
-        out.append(f"<h3>{html.escape(f['question'])}</h3>\n<p>{html.escape(f['answer'])}</p>")
-    return "\n".join(out) + "\n"
+def rank_math_field(kw: dict) -> str:
+    return ", ".join([kw["focus"]] + kw["secondary"][:4])          # Rank Math: first = focus, 5 keywords in total
 
 
-def table_html(ct: dict) -> str:
-    th = "".join(f"<th>{html.escape(c)}</th>" for c in ct["columns"])
-    body = "\n".join("<tr>" + "".join(f"<td>{html.escape(c)}</td>" for c in r) + "</tr>" for r in ct["rows"])
-    cap = f"<caption>{html.escape(ct['caption'])}</caption>\n" if ct.get("caption") else ""
-    return f'<table>\n{cap}<thead><tr>{th}</tr></thead>\n<tbody>\n{body}\n</tbody>\n</table>\n'
+def yn(v) -> str:
+    return "-" if v is None else ("yes" if v else "no")
 
 
-def social_md(extras: dict, primary: str) -> str:
-    out = [f"# Social concepts: {primary}", "",
-           "Drafts only. Add your own link and image. Do not put affiliate links directly in posts unless the platform's "
-           "rules and the FTC disclosure rules are met; linking to your article (which carries the disclosure) is safer.", ""]
-    if extras.get("pins"):
-        out += ["## Pinterest pins", ""]
-        for i, p in enumerate(extras["pins"], 1):
-            out += [f"### Pin {i}: {p['angle']}", f"**Title ({len(p['title'])} chars):** {p['title']}", "",
-                    f"**Description ({len(p['description'])} chars):** {p['description']}", "",
-                    f"**Image direction:** {p['image_direction']}", ""]
-    if extras.get("facebook"):
-        out += ["## Facebook posts", ""]
-        for i, f in enumerate(extras["facebook"], 1):
-            out += [f"### Post {i} ({f['style']})", f["text"], ""]
-    return "\n".join(out) + "\n"
+# ------------------------------------------------------------------ files
+def fields_md(ctx: dict) -> str:
+    kw, plan = ctx["kw"], ctx["plan"]
+    L = [f"# Rank Math fields: {plan['h1']}", "",
+         "Paste these into the Rank Math panel of the post, and publish the text of `optimized_article`.", "",
+         "**Focus Keyword(s)** (first is the focus keyword; Rank Math allows 5 in total):", "", "```", rank_math_field(kw), "```", ""]
+    if kw["semantic"]:
+        L += ["**Semantic keywords** are not entered in Rank Math. They are worked into the text and headings instead: " + ", ".join(kw["semantic"]), ""]
+    if plan.get("seo_title"):
+        L += ["**SEO Title:**", "", "```", plan["seo_title"], "```", f"({len(plan['seo_title'])} characters)", ""]
+    if plan.get("meta_description"):
+        L += ["**Meta Description:**", "", "```", plan["meta_description"], "```", f"({len(plan['meta_description'])} characters)", ""]
+    L += ["**Permalink (slug):**", "", "```", plan["slug"], "```",
+          "If the post is already published, keep its current URL unless you add a redirect. Changing a live URL without one loses its links and rankings.", "",
+          f"**H1 (article title):** {plan['h1']}", "",
+          "**Rank Math preview:** check the title and description in Rank Math's snippet preview. It measures pixel width, which can differ from character counts."]
+    return "\n".join(L) + "\n"
 
 
-def build_report(ctx: dict) -> str:
-    art, primary, core, rows = ctx["article"], ctx["primary"], ctx.get("core"), ctx["checks"]
-    s = checks.summarize(rows)
-    na_note = f" ({s['na']} not testable for this file type)" if s["na"] else ""
-    out = [f"# SEO report: {art.title or Path(art.path).name}",
-           f"*File:* `{Path(art.path).name}` ({art.fmt}) | *Words:* {art.word_count:,} | *Run date:* {ctx['today']}",
-           f"*Focus keyword:* **{primary}**" + (" (chosen by the agent: please confirm)" if ctx.get("keyword_suggested") else ""),
-           "",
-           "> Your article was not changed. These are suggestions for you to apply in WordPress / Rank Math.",
-           "> Checks marked *approx* are the agent's approximation of Rank Math's test. Confirm in the plugin before publishing.",
-           "",
-           "## 1. Rank Math checklist",
-           f"**Now (with the suggested SEO title, description and slug): {s['pass']} pass, {s['warn']} warn, "
-           f"{s['fail']} fail** out of {s['total']} testable checks{na_note}."]
-    after = ctx.get("checks_after")
-    if after:
-        sa = checks.summarize(after)
-        out += [f"**After you also apply the suggested heading, intro and alt-text fixes: {sa['pass']} pass, "
-                f"{sa['warn']} warn, {sa['fail']} fail.** (Predicted by the agent; Rank Math's own score is the final word.)"]
-    out += ["", "| Group | Test | Now | After fixes | Detail |", "|---|---|---|---|---|"]
-    after_by_test = {r["test"]: r for r in (after or [])}
-    for r in rows:
-        tag = ICON[r["status"]] + ("" if r["exact"] else " (approx)")
-        a = after_by_test.get(r["test"])
-        aft = "same" if (not a or a["status"] == r["status"]) else ICON[a["status"]] + ("" if a["exact"] else " (approx)")
-        out.append(f"| {r['group']} | {r['test']} | {tag} | {aft} | {r['detail']} |")
-
-    if core:
-        out += ["", "## 2. SEO fields", "", "See `rank_math_fields.md` for copy-paste blocks.", "",
-                f"- **Focus keyword(s):** {focus_keyword_field(primary, core.get('secondary_keywords', []))}",
-                f"- **SEO title:** {core.get('seo_title') or 'Not generated'}",
-                f"- **Meta description:** {core.get('meta_description') or 'Not generated'}",
-                f"- **Slug:** {core.get('slug')}"]
-
-        out += ["", "## 3. Keyword map", "", "| Keyword | Intent | Where to use | Note |", "|---|---|---|---|"]
-        for k in core["keyword_map"]:
-            out.append(f"| {k['keyword']} | {k['intent']} | {k['place']} | {k['note']} |")
-        out += ["", "Search volume and difficulty are **Not verified**: they need a paid keyword tool."]
-
-        fixes = core.get("heading_fixes") or []
-        out += ["", "## 4. Suggested heading fixes"]
-        if fixes:
-            out += ["", "| Current heading | Suggested | Why |", "|---|---|---|"]
-            out += [f"| {f['current']} | {f['suggested']} | {f['reason']} |" for f in fixes]
-        else:
-            out += ["", "None needed or none validated."]
-        intro_failed = any(r["test"].startswith("Focus keyword in first 10%") and r["status"] == "fail" for r in rows)
-        if intro_failed and core.get("intro_fix"):
-            f = core["intro_fix"]
-            out += ["", "**Intro fix** (the focus keyword is missing from the first 10% of the content):", "",
-                    f"- Current: {f['current_sentence']}", f"- Suggested: {f['suggested']}"]
-
-        out += ["", "## 5. Internal link suggestions"]
-        if core.get("internal_links"):
-            out += ["", "| Link this existing text | to this page | Section |", "|---|---|---|"]
-            out += [f"| {l['anchor_text']} | {l['url']} ({l['page_title']}) | {l['section']} |" for l in core["internal_links"]]
-        else:
-            out += ["", "None. Add your posts to `site_pages.csv` to get suggestions."]
-
-        if art.images and core.get("image_alts"):
-            out += ["", "## 6. Image alt text", "", "| Image # | Suggested alt text |", "|---|---|"]
-            out += [f"| {a['image_number']} | {a['alt']} |" for a in core["image_alts"]]
-
-        out += ["", "## 7. FAQs"]
-        if core.get("faqs"):
-            out += ["", "Use Rank Math's FAQ block (`faq.html` has the text). Answers use only facts stated in your article.", ""]
-            for f in core["faqs"]:
-                out += [f"**{f['question']}**  ", f["answer"], ""]
-        else:
-            out += ["", "No FAQ could be supported by the article text."]
-
-        out += ["", "## 8. Comparison table"]
-        ct = core.get("comparison_table")
-        if ct:
-            out += ["", f"{ct['reason']} The table is in `comparison_table.html`. Cells with numbers that are not in the article read \"Not verified\".", "",
-                    "| " + " | ".join(ct["columns"]) + " |", "|" + "---|" * len(ct["columns"])]
-            out += ["| " + " | ".join(r) + " |" for r in ct["rows"]]
-        else:
-            out += ["", "Not added: the article does not compare enough products on shared attributes."]
-    else:
-        out += ["", "## 2. SEO fields", ctx.get("llm_note", "LLM step skipped."),
-                "Only the content checks above could be run."]
-
-    if ctx.get("extras") and (ctx["extras"].get("pins") or ctx["extras"].get("facebook")):
-        out += ["", "## 9. Social concepts", "See `social.md`."]
-    notes = (core or {}).get("notes", []) + ctx.get("notes", [])
-    if notes:
-        out += ["", "## Run notes", *[f"- {n}" for n in notes]]
-    return "\n".join(out) + "\n"
+def tree(outline: list) -> list:
+    return [f"{'  ' * (lvl - 1)}- H{lvl}: {text}" for lvl, text in outline]
 
 
-def write_article_outputs(base: Path, folder: str, ctx: dict) -> Path:
-    out = base / folder
+def structure_md(ctx: dict) -> str:
+    L = ["# Heading structure", "", "## Before", "", *tree(ctx["outline_before"]), "", "## After", "", *tree(ctx["outline_after"]), ""]
+    if ctx["heading_changes"]:
+        L += ["## What changed", "", "| Was | Now |", "|---|---|",
+              *[f"| {a} | {b} |" for a, b in ctx["heading_changes"]], ""]
+    for n in ctx["structure_notes"]:
+        L.append(f"- {n}")
+    return "\n".join(L) + "\n"
+
+
+def coverage_md(ctx: dict) -> str:
+    intent, cov = ctx["plan"]["intent"], ctx["plan"]["coverage"]
+    L = [f"# Search intent and topical coverage: {ctx['kw']['focus']}", "",
+         f"**Search intent:** {intent['primary']}  |  **Does the article serve it?** {intent['match']}", "", intent["notes"], "",
+         "**What a person searching this keyword expects:**", *[f"- {w}" for w in intent["wants"]], "",
+         "## Topic coverage", "",
+         "The agent does not write missing sections: it cannot know facts you have not given it. Use this list to decide what to add.", "",
+         "| Topic | Status | Where it is covered | Suggested heading | Questions to answer |", "|---|---|---|---|---|"]
+    for c in cov:
+        L.append(f"| {c['topic']} | {c['status']} | {c['where'] or '-'} | {c['suggested_heading'] or '-'} | {'; '.join(c['questions']) or '-'} |")
+    if not cov:
+        L.append("| (no coverage review returned) | | | | |")
+    gaps = [c for c in cov if c["status"] == "missing"]
+    L += ["", f"**{len(gaps)} topic(s) missing**" + (": " + ", ".join(c["topic"] for c in gaps) if gaps else "")]
+    return "\n".join(L) + "\n"
+
+
+def changes_md(ctx: dict) -> str:
+    kws = all_kws(ctx["kw"])
+    ed = ctx["edits"]
+    L = ["# Changes to the text", "", "Keywords are shown in **bold** here only. Headings are in `heading_structure.md`.", ""]
+    if not ed["edits"]:
+        L.append("No paragraph was rewritten.")
+    for e in ed["edits"]:
+        L += [f"### Paragraph {e['idx']}", "", "**Before**", "", e["before"], "", "**After**", "", mark(e["after"], kws), ""]
+    gr = ctx.get("grammar") or {}
+    if gr.get("edits"):
+        L += ["## Grammar and spelling fixes", ""]
+        for e in gr["edits"]:
+            L += [f"- Paragraph {e['idx']}: {e['before'][:90]}... -> {e['after'][:90]}...", ""]
+    if ed["rejected"]:
+        L += ["## Edits the agent refused", "", "The model proposed these but they broke a safety rule, so they were not applied:", ""]
+        for r in ed["rejected"]:
+            L.append(f"- Paragraph {r['idx']} (round {r['round']}): {r['reason']}")
+    return "\n".join(L) + "\n"
+
+
+def keyword_rows(ctx: dict) -> list:
+    kw, plan, art = ctx["kw"], ctx["plan"], ctx["article_after"]
+    title, meta, slug = plan.get("seo_title") or "", plan.get("meta_description") or "", plan["slug"]
+    subs = [t for _l, t in art.headings]
+    body = art.body_text
+    rows = []
+    for cat, ks in (("focus", [kw["focus"]]), ("secondary", kw["secondary"]), ("semantic", kw["semantic"])):
+        for k in ks:
+            rows.append({
+                "category": cat, "keyword": k,
+                "title": checks.has_phrase(title, k), "meta": checks.has_phrase(meta, k),
+                "h1": checks.has_phrase(plan.get("h1", ""), k),
+                "subheadings": sum(1 for t in subs if checks.has_phrase(t, k)),
+                "body": checks.count_phrase(body, k),
+                "first10": checks.has_phrase(checks.first_10_percent(art.words), k),
+                "slug": (checks.slugify(k) in slug) if cat == "focus" else None,
+            })
+    return rows
+
+
+def report_md(ctx: dict) -> str:
+    cfg, plan = ctx["cfg"], ctx["plan"]
+    sb, sa = checks.summarize(ctx["rows_before"]), checks.summarize(ctx["rows_after"])
+    fin = ctx["final_density"]
+    tgt, tol = cfg["seo"]["density_target"], cfg["seo"]["density_tolerance"]
+    hist = ctx["edits"]["history"]
+    L = [f"# SEO report: {plan['h1']}",
+         f"*File:* `{Path(ctx['article_before'].path).name}` | *Words:* {ctx['article_before'].word_count:,} -> {ctx['article_after'].word_count:,} | *Run date:* {ctx['today']}", "",
+         "> Your original file was not changed. The optimized copy is `optimized_article`. Read `changes.md` before you publish it.",
+         "> Checks marked *approx* are the agent's approximation of Rank Math's tests; Rank Math's own score has the final word.", "",
+         "## 1. Result",
+         f"- **Keyword density:** {hist[0]['density']}% -> **{fin}%** (target {tgt}% +/- {tol}). "
+         + ("On target." if abs(fin - tgt) <= tol else "Not on target: see the run notes.")
+         + " Rank Math's own best band is 1-1.5% and it warns above 2.5%, so 1.7% sits just above its best band and well under its warning level.",
+         f"- **Checklist:** {sb['pass']} pass / {sb['warn']} warn / {sb['fail']} fail before -> **{sa['pass']} pass / {sa['warn']} warn / {sa['fail']} fail** after, "
+         f"out of {sa['total']} testable checks (images and links are not tested).",
+         f"- **Search intent:** {plan['intent']['primary']} (article serves it: {plan['intent']['match']}). Topics missing: "
+         f"{sum(1 for c in plan['coverage'] if c['status'] == 'missing')}. See `topical_coverage.md`.",
+         f"- **Paragraphs rewritten:** {len(ctx['edits']['edits'])} (refused by the safety rules: {len(ctx['edits']['rejected'])}).", "",
+         "## 2. Keywords by category", "",
+         "| Category | Keyword | SEO title | Meta | H1 | Subheadings | Body mentions | First 10% | In slug |", "|---|---|---|---|---|---|---|---|---|"]
+    for r in ctx["kw_rows"]:
+        sug = " (suggested: confirm)" if r["keyword"] in ctx["suggested"] else ""
+        L.append(f"| {r['category']} | {r['keyword']}{sug} | {yn(r['title'])} | {yn(r['meta'])} | {yn(r['h1'])} | "
+                 f"{r['subheadings']} | {r['body']} | {yn(r['first10'])} | {yn(r['slug'])} |")
+    L += ["", "Focus and secondary keywords count toward density. Semantic keywords are supporting vocabulary and do not.", "",
+          "## 3. Density tuning", "", "| Round | Density | Keyword mentions | Paragraphs asked | Accepted |", "|---|---|---|---|---|"]
+    for h in hist:
+        L.append(f"| {h['round']} | {h['density']}% | {h['count']} of {h['words']} words | {h.get('asked', '-')} | {h.get('accepted', '-')} |")
+    L += ["", "## 4. Rank Math checklist", "", "| Group | Test | Before | After | Detail (after) |", "|---|---|---|---|---|"]
+    before = {r["test"]: r for r in ctx["rows_before"]}
+    for r in ctx["rows_after"]:
+        b = before.get(r["test"])
+        L.append(f"| {r['group']} | {r['test']} | {ICON[b['status']] if b else '-'} | {ICON[r['status']]}{'' if r['exact'] else ' (approx)'} | {r['detail']} |")
+    if ctx["notes"]:
+        L += ["", "## Run notes", *[f"- {n}" for n in ctx["notes"]]]
+    L += ["", "## What to do next",
+          "1. Read `changes.md` and `heading_structure.md`. Fix anything you disagree with directly in `optimized_article`.",
+          "2. Paste the values from `rank_math_fields.md` into Rank Math.",
+          "3. Use `topical_coverage.md` to decide which missing topics to add (the agent only works with facts already in your article).",
+          "4. Add images and links in WordPress (not handled here), then let Rank Math's own score confirm."]
+    return "\n".join(L) + "\n"
+
+
+def write_reports(out: Path, ctx: dict) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    core, extras = ctx.get("core"), ctx.get("extras")
-    (out / "seo_report.md").write_text(build_report(ctx), encoding="utf-8")
-    (out / "rank_math_fields.md").write_text(rank_math_fields_md(ctx["article"], ctx["primary"], core, ctx["cfg"]),
-                                             encoding="utf-8")
-    if core and core.get("faqs"):
-        (out / "faq.html").write_text(faq_html(core["faqs"]), encoding="utf-8")
-    if core and core.get("comparison_table"):
-        (out / "comparison_table.html").write_text(table_html(core["comparison_table"]), encoding="utf-8")
-    if core and core.get("internal_links"):
-        with open(out / "internal_links.csv", "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["anchor_text", "url", "page_title", "section"])
-            w.writeheader()
-            w.writerows(core["internal_links"])
-    if extras and (extras.get("pins") or extras.get("facebook")):
-        (out / "social.md").write_text(social_md(extras, ctx["primary"]), encoding="utf-8")
-    (out / "seo_package.json").write_text(json.dumps({
-        "file": Path(ctx["article"].path).name, "focus_keyword": ctx["primary"], "run_date": ctx["today"],
-        "checks": ctx["checks"], "check_summary": checks.summarize(ctx["checks"]),
-        "checks_after_fixes": ctx.get("checks_after"),
-        "seo": {k: v for k, v in (core or {}).items() if not k.startswith("_")} or None, "extras": extras, "notes": ctx.get("notes", []),
-    }, indent=2, ensure_ascii=False), encoding="utf-8")
-    return out
+    (out / "rank_math_fields.md").write_text(fields_md(ctx), encoding="utf-8")
+    (out / "heading_structure.md").write_text(structure_md(ctx), encoding="utf-8")
+    (out / "topical_coverage.md").write_text(coverage_md(ctx), encoding="utf-8")
+    (out / "changes.md").write_text(changes_md(ctx), encoding="utf-8")
+    (out / "seo_report.md").write_text(report_md(ctx), encoding="utf-8")
+    pkg = {
+        "file": Path(ctx["article_before"].path).name, "run_date": ctx["today"],
+        "keywords": ctx["kw"], "seo": {k: ctx["plan"].get(k) for k in ("h1", "seo_title", "meta_description", "slug")},
+        "intent": ctx["plan"]["intent"], "coverage": ctx["plan"]["coverage"],
+        "outline_before": ctx["outline_before"], "outline_after": ctx["outline_after"],
+        "density": {"history": ctx["edits"]["history"], "final": ctx["final_density"]},
+        "edits": ctx["edits"]["edits"], "rejected_edits": ctx["edits"]["rejected"],
+        "checks_before": ctx["rows_before"], "checks_after": ctx["rows_after"], "notes": ctx["notes"],
+    }
+    (out / "seo_package.json").write_text(json.dumps(pkg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def write_audit_only(out: Path, article, kw: dict, rows: list, note: str, today: str) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    s = checks.summarize(rows)
+    L = [f"# SEO audit only: {article.title or Path(article.path).name}", "",
+         f"No optimized copy was made: {note}", "", f"{s['pass']} pass / {s['warn']} warn / {s['fail']} fail", "",
+         "| Group | Test | Result | Detail |", "|---|---|---|---|"]
+    for r in rows:
+        L.append(f"| {r['group']} | {r['test']} | {ICON[r['status']]}{'' if r['exact'] else ' (approx)'} | {r['detail']} |")
+    (out / "seo_report.md").write_text("\n".join(L) + "\n", encoding="utf-8")

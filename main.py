@@ -1,23 +1,21 @@
 """
 main.py
 -------
-Rank Math-aware SEO for articles you ALREADY have. For each article in articles/:
+SEO optimizer for Rank Math. For each article in articles/ (listed in jobs.csv with its keywords):
 
-  1. read it (.docx / .html / .md / .txt)
-  2. pick the focus keyword (jobs.csv, or the agent suggests one)
-  3. collect keyword ideas (keywords.csv from the research agent, else free Google autocomplete)
-  4. ask Groq for SEO title, meta description, secondary keywords, keyword map, heading fixes,
-     FAQs, comparison table, internal links, image alt text (all validated by Python)
-  5. run the Rank Math-style checklist against the article + suggested fields
-  6. optionally draft 3 Pinterest pins and 3 Facebook posts
-  7. write the report and copy-paste files
+  1. read the article and run the Rank Math-style checklist ("before")
+  2. strategy: search intent, new H1, SEO title, meta description, corrected H1/H2/H3 structure, topical-coverage review
+  3. keyword placement and density tuning to your target, with every rewrite checked by Python
+  4. save an OPTIMIZED COPY (your original is never changed) and re-read that copy to run the checklist again ("after")
+  5. write the Rank Math fields and the reports
 
-Your article is never modified and nothing is published.
+Images and links are not optimized (they are kept as they are). Nothing is published.
 """
 from __future__ import annotations
 
 import csv
 import json
+import re
 import sys
 import time
 from datetime import date
@@ -26,11 +24,12 @@ from pathlib import Path
 import yaml
 
 import checks
+import doc as docmod
+import edits
 import exporters
-import keywords as kw
 import llm
 import reader
-import seo
+import strategy
 
 ROOT = Path(__file__).parent
 PAUSE = 3          # seconds between articles (free-tier rate limits)
@@ -41,20 +40,28 @@ def load_config(path: Path = ROOT / "config.yaml") -> dict:
     cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     cfg.setdefault("site", {})
     cfg.setdefault("llm", {"model": "openai/gpt-oss-120b", "max_tokens": 6000})
+    cfg.setdefault("seo", {})
+    for k, v in {"density_target": 1.7, "density_tolerance": 0.2, "max_edit_rounds": 3, "similarity_min": 0.6,
+                 "grammar": False, "skip_tests": ["images", "links"]}.items():
+        cfg["seo"].setdefault(k, v)
     cfg.setdefault("rank_math", {})
-    rm = cfg["rank_math"]
-    rm.setdefault("title_max_chars", 60)
-    rm.setdefault("meta_max_chars", 160)
-    rm.setdefault("meta_min_chars", 110)
-    rm.setdefault("min_words", 600)
-    rm.setdefault("secondary_keywords", 3)
-    cfg.setdefault("faq_count", 5)
-    cfg.setdefault("extras", {})
+    for k, v in {"title_max_chars": 60, "meta_max_chars": 160, "meta_min_chars": 110, "min_words": 600, "secondary_keywords": 3}.items():
+        cfg["rank_math"].setdefault(k, v)
     return cfg
 
 
+def parse_list(text) -> list:
+    out, seen = [], set()
+    for k in re.split(r"[;|\n]", text or ""):
+        k = re.sub(r"\s+", " ", k.strip().lower())
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
 def load_jobs(root: Path = ROOT) -> list:
-    """jobs.csv rows (file, focus_keyword). If the file has no rows, every file in articles/ is processed."""
+    """jobs.csv: file,focus_keyword,secondary_keywords,semantic_keywords,power_word  (lists separated by ;)"""
     jobs = []
     f = root / "jobs.csv"
     if f.exists():
@@ -62,112 +69,135 @@ def load_jobs(root: Path = ROOT) -> list:
             for r in csv.DictReader(fh):
                 name = (r.get("file") or "").strip()
                 if name:
-                    jobs.append({"file": name, "focus_keyword": (r.get("focus_keyword") or "").strip().lower()})
+                    jobs.append({"file": name, "focus_keyword": (r.get("focus_keyword") or "").strip().lower(),
+                                 "secondary": parse_list(r.get("secondary_keywords")), "semantic": parse_list(r.get("semantic_keywords")),
+                                 "power_word": (r.get("power_word") or "").strip()})
     if not jobs:
         art = root / "articles"
         if art.exists():
-            jobs = [{"file": p.name, "focus_keyword": ""} for p in sorted(art.iterdir())
-                    if p.suffix.lower() in SUPPORTED and not p.name.startswith(("~$", "."))]
+            jobs = [{"file": p.name, "focus_keyword": "", "secondary": [], "semantic": [], "power_word": ""}
+                    for p in sorted(art.iterdir()) if p.suffix.lower() in SUPPORTED and not p.name.startswith(("~$", "."))]
     return jobs
 
 
-def load_site_pages(root: Path = ROOT) -> list:
-    f = root / "site_pages.csv"
+def heading_changes(document) -> list:
     out = []
-    if f.exists():
-        with open(f, newline="", encoding="utf-8-sig") as fh:
-            for r in csv.DictReader(fh):
-                url, title = (r.get("url") or "").strip(), (r.get("title") or "").strip()
-                if url:
-                    out.append({"url": url, "title": title or url})
+    for b in document.blocks:
+        for lvl, text in b.insert_before:
+            out.append(("(inserted)", f"H{lvl}: {text}"))
+        if b.kind in ("title", "h") and (b.new_text is not None or b.new_level is not None):
+            a, z = f"H{b.level}: {b.text}", f"H{b.cur_level}: {b.cur_text}"
+            if a != z:
+                out.append((a, z))
     return out
 
 
-def load_keyword_pool(path: Path) -> list:
-    if not path.exists():
-        return []
-    out = []
-    with open(path, newline="", encoding="utf-8-sig") as fh:
-        for r in csv.DictReader(fh):
-            k = (r.get("keyword") or "").strip().lower()
-            if k:
-                out.append(k)
-    return out
+def density_of(article, kw: dict) -> float:
+    wc = article.word_count
+    total = sum(checks.count_phrase(article.body_text, k) for k in [kw["focus"]] + kw["secondary"])
+    return round(100 * total / wc, 2) if wc else 0.0
 
 
-def process_article(job: dict, cfg: dict, site_pages: list, pool_file: list, root: Path, out_base: Path,
-                    today: str) -> dict:
-    path = root / "articles" / job["file"]
-    notes = []
+def process_article(job: dict, cfg: dict, root: Path, out_base: Path, today: str) -> dict:
+    name = job["file"]
+    path = root / "articles" / name
     if not path.exists():
-        return {"file": job["file"], "status": "failed: file not found in articles/"}
+        return {"file": name, "status": "failed: file not found in articles/"}
+    if not job["focus_keyword"]:
+        return {"file": name, "status": "failed: put the focus_keyword for this article in jobs.csv"}
     try:
-        article = reader.read_article(path)
+        article_before = reader.read_article(path)
+        document = docmod.load(path)
     except Exception as e:  # noqa: BLE001
-        return {"file": job["file"], "status": f"failed: could not read file ({e})"}
-    if article.word_count < 50:
-        return {"file": job["file"], "status": "failed: almost no text found in the file"}
+        return {"file": name, "status": f"failed: could not read file ({e})"}
+    if article_before.word_count < 50:
+        return {"file": name, "status": "failed: almost no text found in the file"}
 
-    # keyword pool
-    pool = list(pool_file)
-    if not pool:
-        seed = job["focus_keyword"] or " ".join((article.title or "").split()[:6])
-        if seed:
-            pool = [r["keyword"] for r in kw.collect_keywords([seed], alphabet=False, max_total=40)]
-            if not pool:
-                notes.append("Google autocomplete returned nothing; keyword ideas come from the article only.")
+    focus = job["focus_keyword"]
+    secondary = [k for k in job["secondary"] if k != focus][:4]
+    semantic = [k for k in job["semantic"] if k != focus and k not in secondary]
+    kw = {"focus": focus, "secondary": secondary, "semantic": semantic, "power_word": job["power_word"] or None}
+    notes = []
+    if len(job["secondary"]) > 4:
+        notes.append("Rank Math allows 5 keywords in total, so only the first 4 secondary keywords are used.")
 
-    # focus keyword
-    primary, suggested = job["focus_keyword"], False
-    core = extras = None
-    llm_note = None
-    if not primary:
-        try:
-            primary, suggested = seo.suggest_focus_keyword(article, pool, cfg), True
-        except Exception as e:  # noqa: BLE001
-            llm_note = f"LLM step skipped: {e}."
-            commercial = [k for k in pool if checks.has_phrase(article.body_text, k)]
-            primary = commercial[0] if commercial else ""
-            if not primary:
-                return {"file": job["file"], "status": "failed: no focus_keyword in jobs.csv and the agent could not suggest one"}
-            suggested = True
-            notes.append("Focus keyword taken from keyword ideas that appear in the article. Please confirm it.")
-
-    # LLM package
-    if llm_note is None:
-        try:
-            core = seo.generate_core(article, primary, pool, site_pages, cfg)
-        except llm.LLMUnavailable as e:
-            llm_note = f"LLM step skipped: {e}."
-        except Exception as e:  # noqa: BLE001
-            llm_note = f"LLM step failed: {e}."
-    if core is not None and (cfg.get("extras", {}).get("pinterest") or cfg.get("extras", {}).get("facebook")):
-        try:
-            extras = seo.generate_extras(article, primary, cfg)
-        except Exception as e:  # noqa: BLE001
-            notes.append(f"Social concepts skipped: {e}")
-    if llm_note:
-        notes.append(llm_note)
-
-    rows = checks.run_checks(article, primary, (core or {}).get("secondary_keywords", []),
-                             (core or {}).get("seo_title"), (core or {}).get("meta_description"),
-                             (core or {}).get("slug"), cfg)
-    rows_after = None
-    if core is not None:
-        core["_primary"] = primary
-        after = seo.apply_suggestions(article, core)
-        rows_after = checks.run_checks(after, primary, core.get("secondary_keywords", []), core.get("seo_title"),
-                                       core.get("meta_description"), core.get("slug"), cfg)
-    ctx = {"cfg": cfg, "today": today, "article": article, "primary": primary, "keyword_suggested": suggested,
-           "core": core, "extras": extras, "checks": rows, "checks_after": rows_after, "notes": notes,
-           "llm_note": llm_note}
+    rows_before = checks.run_checks(article_before, focus, secondary, None, None, None, cfg)
     folder = checks.slugify(path.stem, 60) or "article"
-    outdir = exporters.write_article_outputs(out_base, folder, ctx)
-    s = checks.summarize(rows)
-    return {"file": job["file"], "status": "success", "focus_keyword": primary, "folder": str(outdir),
-            "pass": s["pass"], "warn": s["warn"], "fail": s["fail"], "total": s["total"],
-            "after_pass": checks.summarize(rows_after)["pass"] if rows_after else None,
-            "seo_title": (core or {}).get("seo_title") or "", "notes": len(notes) + len((core or {}).get("notes", []))}
+    outdir = out_base / folder
+    outline_before = document.outline()
+
+    # ---- 2. strategy
+    try:
+        plan = strategy.generate_strategy(document, kw, cfg)
+    except llm.LLMUnavailable as e:
+        exporters.write_audit_only(outdir, article_before, kw, rows_before, f"{e}. Add GROQ_API_KEY as an Actions secret.", today)
+        return {"file": name, "status": "audit only: GROQ_API_KEY is not set", "folder": str(outdir)}
+    except Exception as e:  # noqa: BLE001
+        exporters.write_audit_only(outdir, article_before, kw, rows_before, f"the AI step failed ({e}).", today)
+        return {"file": name, "status": f"failed: AI step ({str(e)[:150]})", "folder": str(outdir)}
+
+    suggested = []
+    if plan["suggested_secondary"]:
+        kw["secondary"] = plan["suggested_secondary"]
+        suggested += kw["secondary"]
+    if plan["suggested_semantic"]:
+        kw["semantic"] = plan["suggested_semantic"]
+        suggested += kw["semantic"]
+    if suggested:
+        notes.append("You gave no " + " / ".join(x for x, f in (("secondary", job["secondary"]), ("semantic", job["semantic"])) if not f)
+                     + " keywords, so the agent suggested some from your article. Confirm them: " + ", ".join(suggested))
+    structure_notes = strategy.apply_strategy(document, plan)
+    outline_after = document.outline()
+    heads_text = [t for lvl, t in outline_after if lvl > 1]
+    for k in kw["secondary"]:
+        if not any(checks.has_phrase(t, k) for t in heads_text):
+            notes.append(f"The secondary keyword '{k}' is not in any heading because no heading fit it naturally. "
+                         "Consider renaming one section so it appears once in an H2 or H3.")
+
+    # ---- 3. keywords and density
+    try:
+        edit_rep = edits.optimize_body(document, kw, cfg)
+    except llm.LLMUnavailable:
+        raise
+    except Exception as e:  # noqa: BLE001
+        edit_rep = {"history": [{"round": 0, "density": 0.0, "count": 0, "words": article_before.word_count}], "edits": [], "rejected": [],
+                    "notes": [], "final": None}
+        notes.append(f"The keyword-editing step failed ({e}); headings and SEO fields are still provided.")
+    grammar = None
+    if cfg["seo"].get("grammar"):
+        try:
+            grammar = edits.grammar_pass(document, kw, cfg)
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"Grammar pass failed ({e}).")
+
+    # ---- 4. save the copy, then judge the saved file itself
+    out_path = docmod.save(document, outdir, "optimized_article")
+    article_after = reader.read_article(out_path)
+    rows_after = checks.run_checks(article_after, focus, kw["secondary"], plan.get("seo_title"), plan.get("meta_description"), plan["slug"], cfg)
+    final_density = density_of(article_after, kw)
+
+    notes += plan["notes"] + structure_notes + edit_rep["notes"]
+    tgt, tol = cfg["seo"]["density_target"], cfg["seo"]["density_tolerance"]
+    if abs(final_density - tgt) > tol:
+        notes.append(f"Density reached {final_density}% against a target of {tgt}% (+/- {tol}). The agent will not force keywords into paragraphs where they do not fit "
+                     "or break its safety rules. Add more relevant text, or adjust density_target in config.yaml.")
+    if edit_rep["rejected"]:
+        notes.append(f"{len(edit_rep['rejected'])} proposed rewrite(s) were refused by the safety rules (see changes.md).")
+    if not checks.has_phrase(checks.first_10_percent(article_after.words), focus):
+        notes.append("The focus keyword is still not in the first 10% of the text: the first paragraph could not be edited.")
+    if article_after.fmt == "docx" and article_before.images:
+        notes.append("Images were kept as they are. Re-add their alt text in WordPress after upload.")
+
+    ctx = {"cfg": cfg, "today": today, "kw": kw, "plan": plan, "edits": edit_rep, "grammar": grammar,
+           "article_before": article_before, "article_after": article_after, "rows_before": rows_before, "rows_after": rows_after,
+           "outline_before": outline_before, "outline_after": outline_after, "heading_changes": heading_changes(document),
+           "structure_notes": structure_notes, "final_density": final_density, "suggested": suggested, "notes": notes}
+    ctx["kw_rows"] = exporters.keyword_rows(ctx)
+    exporters.write_reports(outdir, ctx)
+    sb, sa = checks.summarize(rows_before), checks.summarize(rows_after)
+    return {"file": name, "status": "success", "focus_keyword": focus, "folder": str(outdir),
+            "density_before": edit_rep["history"][0]["density"], "density_after": final_density,
+            "pass_before": sb["pass"], "fail_before": sb["fail"], "pass_after": sa["pass"], "fail_after": sa["fail"], "notes": len(notes)}
 
 
 def run(root: Path = ROOT, cfg: dict | None = None, out_base: Path | None = None, today: str | None = None) -> dict:
@@ -176,26 +206,29 @@ def run(root: Path = ROOT, cfg: dict | None = None, out_base: Path | None = None
     out_base = out_base or root / "output"
     jobs = load_jobs(root)
     if not jobs:
-        print("Nothing to do: put articles in articles/ (and optionally list them in jobs.csv).")
+        print("Nothing to do: put articles in articles/ and list them in jobs.csv with their keywords.")
         return {"status": "failed: no articles", "results": []}
-    site_pages = load_site_pages(root)
-    pool = load_keyword_pool(root / cfg.get("keywords_file", "keywords.csv"))
     results = []
     for i, job in enumerate(jobs):
         if i:
             time.sleep(PAUSE)
-        r = process_article(job, cfg, site_pages, pool, root, out_base, today)
+        try:
+            r = process_article(job, cfg, root, out_base, today)
+        except llm.LLMUnavailable as e:
+            r = {"file": job["file"], "status": f"failed: {e}"}
         results.append(r)
-        print(f"{r['file']}: {r['status']}" + (f"  ({r['pass']} pass / {r['warn']} warn / {r['fail']} fail)"
-                                               if r["status"] == "success" else ""))
+        extra = ""
+        if r["status"] == "success":
+            extra = f"  (density {r['density_before']}% -> {r['density_after']}%, checks {r['pass_before']} -> {r['pass_after']} pass)"
+        print(f"{r['file']}: {r['status']}{extra}")
 
     out_base.mkdir(parents=True, exist_ok=True)
+    cols = ["file", "status", "focus_keyword", "density_before", "density_after", "pass_before", "fail_before", "pass_after", "fail_after", "folder"]
     with open(out_base / "summary.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["file", "status", "focus_keyword", "seo_title", "pass", "warn", "fail", "folder"])
+        w.writerow(cols)
         for r in results:
-            w.writerow([r["file"], r["status"], r.get("focus_keyword", ""), r.get("seo_title", ""),
-                        r.get("pass", ""), r.get("warn", ""), r.get("fail", ""), r.get("folder", "")])
+            w.writerow([r.get(c, "") for c in cols])
     ok = sum(1 for r in results if r["status"] == "success")
     status = "success" if ok == len(results) else ("partial" if ok else "failed")
     summary = {"status": status, "processed": ok, "total": len(results), "results": results}

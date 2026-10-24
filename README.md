@@ -1,53 +1,62 @@
-# SEO Agent for Rank Math ($0)
+# SEO Optimizer for Rank Math ($0)
 
-Does the on-page SEO for articles you **already have**. It does not write or rewrite articles, and it never publishes.
-For each article it produces what you paste into Rank Math plus a checklist that mirrors Rank Math's tests.
+Takes an article you **already have** and gives you back an **optimized copy**:
 
-## What you get per article (`output/<article>/`)
+- **Corrected heading structure**: one H1, sections at H2, sub-points at H3, no skipped levels; headings improved with your keywords; headings added where the article already has an untitled block of content.
+- **Keywords placed by category**: a focus keyword, two or three primary/secondary keywords, a few semantic keywords. The text is tuned to your **keyword-density target (default 1.7%)**.
+- **Rank Math fields**: focus + secondary keywords, SEO title (focus keyword first, power word, number), URL slug, meta description.
+- **Search intent and topical coverage**: what a person searching your focus keyword expects, which topics your article covers, partly covers or misses.
+- **Rank Math-style checklist before and after**. Images and links are left out of the checklist and are not optimized (they are kept as they are).
+- Optional: grammar and spelling fixes (`seo.grammar: true`).
+
+Your original file is never changed. Nothing is published.
+
+## Input: `jobs.csv`
+```
+file,focus_keyword,secondary_keywords,semantic_keywords,power_word
+01_Draft_Stoppers.docx,door draft stopper,foam door seal; draft blocker for renters,cold air; uneven floor; renter friendly,Proven
+```
+| Column | Meaning |
+|---|---|
+| `file` | the article in `articles/` (`.docx`, `.html`, `.md` or `.txt`) |
+| `focus_keyword` | **required**. The one keyword the article ranks for |
+| `secondary_keywords` | 2-3 primary/secondary keywords, separated by `;`. Rank Math allows 5 keywords in total (focus + up to 4) |
+| `semantic_keywords` | a few related phrases, separated by `;`. Worked into the text and headings, not entered in Rank Math |
+| `power_word` | optional word that must appear in the SEO title (for example Proven, Ultimate). Left blank, the agent picks one |
+
+If you leave secondary or semantic keywords blank, the agent suggests some from your article and marks them "suggested: confirm".
+
+## Output (`output/<article>/`)
 | File | Use |
 |---|---|
-| `rank_math_fields.md` | Copy-paste: Focus Keyword(s), SEO Title, Permalink, Meta Description |
-| `seo_report.md` | Rank Math checklist (**now** vs **after the suggested fixes**), keyword map, heading fixes, intro fix, internal links, image alt text, FAQs, comparison table |
-| `faq.html` | FAQ text for Rank Math's FAQ block |
-| `comparison_table.html` | Table for a Custom HTML block (only if the article really compares products) |
-| `internal_links.csv` | Which existing text to link to which of your pages |
-| `social.md` | 3 Pinterest pin concepts + 3 Facebook posts (optional, switch off in `config.yaml`) |
-| `seo_package.json` | Everything, machine-readable |
-`output/summary.csv` lists all articles with pass/warn/fail counts.
+| `optimized_article.docx` (or `.html` / `.md`) | the optimized copy. Read `changes.md` first, then publish |
+| `rank_math_fields.md` | copy-paste: focus keywords, SEO title, permalink, meta description, H1 |
+| `heading_structure.md` | the H1/H2/H3 tree before and after |
+| `topical_coverage.md` | search intent, what searchers expect, covered / partial / missing topics with suggested headings and questions |
+| `changes.md` | every rewritten paragraph, before and after, keywords in bold; and every edit the agent refused |
+| `seo_report.md` | result summary, keywords by category, density tuning rounds, checklist before / after |
+`output/summary.csv` lists every article with density and pass counts before and after.
 
-## Setup (once)
-1. Put these files in the **root** of a GitHub repo. If your articles are unpublished drafts, make the repo **private**.
-2. Repo -> Settings -> Secrets and variables -> Actions -> add `GROQ_API_KEY` (same key as your other agents).
-3. Put your articles in `articles/` (`.docx`, `.html`, `.md` or `.txt`). Your article agent's `.docx` files work as they are.
-4. Optional but recommended:
-   - `jobs.csv`: `file,focus_keyword` (the focus keyword you want for each article). Leave the keyword blank and the agent suggests one for you to confirm. Leave the whole file empty and every file in `articles/` is processed.
-   - `site_pages.csv`: `url,title` of your existing posts, so it can suggest internal links (it only uses URLs from this list).
-   - `keywords.csv`: the research agent's keyword file. Without it, free Google autocomplete is used.
-   - `config.yaml`: put your site address in `site.domain` so internal and external links are told apart in HTML files.
+## Setup
+1. Put the files in the root of a **private** GitHub repo (your drafts are unpublished) and add the secret `GROQ_API_KEY` (Settings -> Secrets and variables -> **Actions**).
+2. Put your articles in `articles/` and fill `jobs.csv`.
+3. Actions -> **SEO Agent** -> Run workflow, then download **seo-results**. Open `output/summary.csv`, then each article's `seo_report.md`.
+4. `config.yaml` holds `density_target` (1.7), `density_tolerance` (0.2), and the other limits.
 
-## Run
-Actions -> **SEO Agent** -> Run workflow, then download the **seo-results** artifact. Start with `output/summary.csv`.
-
-## Applying it in WordPress
-Paste the four values from `rank_math_fields.md` into the Rank Math panel, make the heading and intro fixes you agree with, add the FAQ block
-and Table of Contents block, add the internal links, then let Rank Math's own score confirm.
-**Already-published post? Keep its URL.** Changing a live slug without a redirect loses links and rankings.
+## How it stays safe
+The model proposes, Python decides. A rewritten paragraph is accepted only if it keeps **every number exactly**, adds **no new names**, keeps the **meaning** (word overlap with the original), stays about the **same length**, and **really adds** the asked keyword (never more than twice in one paragraph).
+Headings must point at real headings, may contain a number only if the article has it, and a heading inserted above a block must describe the paragraphs right below it. At most two subheadings carry the exact focus keyword.
+Paragraphs with images or links, tables and the images themselves are never rewritten. The agent does **not** write new sections: it cannot know facts you have not given it, so missing topics are listed, not invented.
 
 ## Honest limits
-- Checks marked *approx* are my approximation of Rank Math (it measures title/description by pixel width, uses its own power-word and
-  sentiment lists, and may match keyword variations differently). Thresholds come from Rank Math's documentation (600+ words, density 1-1.5%,
-  flag above 2.5%, paragraphs over about 120 words, keyword in title/description/URL/first 10%/subheadings). Rank Math's own score is the final word.
-- **Word files from the article agent have no hyperlinks**, so the internal/external link tests show "n/a" for them. Check links in WordPress.
-- Alt text set in Word does not survive into WordPress: add it again after upload.
-- The model only suggests. Python then drops heading fixes that do not match a real heading, internal links whose URL is not in `site_pages.csv`
-  or whose anchor text is not in the article, and any number in a FAQ or table cell that the article does not contain.
-  FAQ answers use only facts in your article. If the article does not support an answer, there is no FAQ for it.
-- The agent builds the slug itself from the focus keyword. If the SEO title cannot be fixed to Rank Math's rules after two repair tries, it says so in the report.
-- No search volume or keyword difficulty (needs a paid tool): they read "Not verified".
-- FAQ schema: use Rank Math's FAQ block. Do not also paste JSON-LD, or the page gets duplicate schema.
-- Social drafts use only facts in the article, no prices, ratings or review counts. Link to your article, which carries your affiliate disclosure.
-- Groq's free tier is rate limited: the agent waits and retries, so a run with many articles can take a few minutes.
+- **Density 1.7%** is the target you asked for. Rank Math's own documentation scores best at 1-1.5% and warns above 2.5%, so 1.7% is a little above its best band. Change `density_target` any time. The agent counts exact phrase matches of the focus and secondary keywords; Rank Math may count slightly differently, so confirm in the plugin.
+- A **long focus keyword** needs many exact repeats to reach a density target and can read as stuffing. If the agent cannot reach the target without breaking a safety rule, it stops and says so in the report instead of forcing it.
+- A rewritten paragraph loses inline formatting inside it (bold or italic words). Headings, untouched paragraphs, images, tables and links keep theirs.
+- Checks marked *approx* (title and description length, power words, sentiment, long paragraphs) are the agent's approximation of Rank Math. The power-word and sentiment lists are the agent's own; Rank Math uses its own list, so a custom `power_word` may not be counted by Rank Math.
+- A **Table of Contents** cannot be added here: add Rank Math's Table of Contents block in WordPress.
+- Slug: built from the focus keyword. If the post is already published, keep its URL unless you add a redirect.
+- Groq's free tier is rate limited: the agent waits and retries. If a request is rejected as too large, lower `llm.max_tokens`.
+- Only the first 2,600 words of a very long article are shown to the model for the strategy step.
 
 ## Tests
-`python tests/test_offline.py` (no network or API key). They use canned model answers, so they prove the reading, checking, validation and export
-logic, not the quality of real Groq output. The first real run is the live test.
+`python tests/test_offline.py` (no network or API key). The model is faked (it follows the task lists, or misbehaves on purpose), so the tests prove the editing, safety rules, density loop and reports, not the quality of real Groq output. The first real run is the live test.

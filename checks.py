@@ -143,14 +143,17 @@ def run_checks(article, primary: str, secondary: list, seo_title: Optional[str],
                         + ("" if article.fmt != "docx" else " (set in Word; WordPress needs alt text added again after upload)")))
     total = sum(count_phrase(article.body_text, k) for k in kws)
     dens = round(100 * total / wc, 2) if wc else 0.0
+    seo_cfg = cfg.get("seo", {})
+    target, tol = seo_cfg.get("density_target"), seo_cfg.get("density_tolerance", 0.2)
     if dens > 2.5:
         st = "fail"
-    elif 1.0 <= dens <= 1.5:
-        st = "pass"
+    elif target is not None:
+        st = "pass" if abs(dens - target) <= tol else "warn"
     else:
-        st = "warn"
-    rows.append(row(G, "Keyword density (primary + secondary)", st,
-                    f"{dens}% ({total} matches in {wc:,} words). Best: 1-1.5%. Above 2.5% is flagged as stuffing.", exact=False))
+        st = "pass" if 1.0 <= dens <= 1.5 else "warn"
+    band = (f"Your target: {target}% (+/- {tol}). Rank Math's own best band is 1-1.5% and it flags above 2.5%."
+            if target is not None else "Best: 1-1.5%. Above 2.5% is flagged as stuffing.")
+    rows.append(row(G, "Keyword density (focus + secondary keywords)", st, f"{dens}% ({total} matches in {wc:,} words). {band}", exact=False))
     if not article.links_detectable:
         for t in ("Internal link", "External link"):
             rows.append(row(G, t, "n/a", "Links cannot be detected in this file (Word files from the article agent drop hyperlinks). Check in WordPress."))
@@ -201,7 +204,18 @@ def run_checks(article, primary: str, secondary: list, seo_title: Optional[str],
     if article.extra_h1:
         rows.append(row(G, "Only one H1 (the post title)", "warn",
                         f"{len(article.extra_h1)} extra H1 in the body. WordPress already uses the post title as H1; use H2 for sections."))
-    return rows
+    return drop_skipped(rows, cfg)
+
+
+SKIPPABLE = {"images": ("Focus keyword in image alt text", "Images or video"),
+             "links": ("Internal link", "External link")}
+
+
+def drop_skipped(rows: list, cfg: dict) -> list:
+    """The creator can switch whole families of tests off (config.yaml: seo.skip_tests)."""
+    skip = set(cfg.get("seo", {}).get("skip_tests") or [])
+    names = {n for k in skip for n in SKIPPABLE.get(k, ())}
+    return [r for r in rows if r["test"] not in names]
 
 
 def summarize(rows: list) -> dict:
