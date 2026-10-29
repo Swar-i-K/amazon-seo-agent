@@ -498,6 +498,61 @@ def test_missing_focus_keyword_and_missing_file_fail_cleanly():
     assert "not found" in s2["results"][0]["status"]
 
 
+def test_jobs_csv_column_mismatch_is_explained_not_misread():
+    root, name = make_repo()
+    # a keyword list written with commas and no quotes: 7 values under a 5-column header
+    (root / "jobs.csv").write_text("file,focus_keyword,secondary_keywords,semantic_keywords,power_word\n"
+                                   f"{name},{FOCUS},foam door seal, draft blocker for renters,cold air,uneven floor,Proven\n")
+    jobs = main.load_jobs(root)
+    assert len(jobs) == 1 and "7 values but the header has 5 columns" in jobs[0]["error"] and "double quotes" in jobs[0]["error"]
+    s, out = run_main(root, FakeLLM())
+    assert s["results"][0]["status"].startswith("failed: jobs.csv line 2")
+    assert not (out / "01-draft-stoppers").exists()                      # nothing was run with shifted keywords
+    # the same list in double quotes works, and commas then separate keywords too
+    (root / "jobs.csv").write_text("file,focus_keyword,secondary_keywords,semantic_keywords,power_word\n"
+                                   f'{name},{FOCUS},"foam door seal, draft blocker for renters","cold air, uneven floor",Proven\n')
+    j = main.load_jobs(root)[0]
+    assert j["secondary"] == SECONDARY and j["semantic"] == SEMANTIC and j["power_word"] == "Proven"
+    # a shorter row (no power word) is fine
+    (root / "jobs.csv").write_text("file,focus_keyword,secondary_keywords,semantic_keywords,power_word\n"
+                                   f"{name},{FOCUS},foam door seal;draft blocker for renters\n")
+    j = main.load_jobs(root)[0]
+    assert j["secondary"] == SECONDARY and j["semantic"] == [] and j["power_word"] == ""
+
+
+def test_semicolon_rows_and_names_without_extension():
+    root, name = make_repo()
+    (root / "articles" / name).rename(root / "articles" / "01_article_1.docx")
+    # exactly the style that failed: comma header, semicolon columns, no file extension
+    (root / "jobs.csv").write_text("file,focus_keyword,secondary_keywords,semantic_keywords,power_word\n"
+                                   "01_article_1;door draft stopper;foam door seal;cold air\n")
+    j = main.load_jobs(root)[0]
+    assert (j["file"], j["focus_keyword"], j["secondary"], j["semantic"]) == ("01_article_1", FOCUS, ["foam door seal"], ["cold air"])
+    s, out = run_main(root, FakeLLM())
+    assert s["status"] == "success" and (out / "01-article-1" / "optimized_article.docx").exists()
+    # semicolon header too, and several keywords in one cell with |
+    (root / "jobs.csv").write_text("file;focus_keyword;secondary_keywords;semantic_keywords\n"
+                                   "01_article_1;door draft stopper;foam door seal|draft blocker for renters;cold air|uneven floor\n")
+    j = main.load_jobs(root)[0]
+    assert j["secondary"] == SECONDARY and j["semantic"] == SEMANTIC
+    # no header line at all
+    (root / "jobs.csv").write_text("01_article_1;door draft stopper;foam door seal;cold air\n")
+    j = main.load_jobs(root)[0]
+    assert j["file"] == "01_article_1" and j["focus_keyword"] == FOCUS and j["secondary"] == ["foam door seal"]
+
+
+def test_file_lookup_ignores_extension_and_case_and_lists_files_on_miss():
+    root, name = make_repo()
+    arts = root / "articles"
+    (arts / "02_other.md").write_text("# Other\n\n" + "word " * 80)
+    assert main.resolve_article(root, "01_draft_stoppers")[0].name == name           # no extension, other case
+    assert main.resolve_article(root, "01_Draft_Stoppers.docx")[0].name == name
+    (arts / "01_Draft_Stoppers.md").write_text("# T\n\n" + "word " * 80)
+    assert main.resolve_article(root, "01_Draft_Stoppers")[0].suffix == ".docx"       # docx preferred over md
+    path, hint = main.resolve_article(root, "99_missing")
+    assert path is None and "01_Draft_Stoppers.docx" in hint and "02_other.md" in hint
+
+
 def test_parse_list_and_jobs():
     assert main.parse_list("Foam Door Seal; draft blocker for renters |foam door seal") == ["foam door seal", "draft blocker for renters"]
     root, name = make_repo()
