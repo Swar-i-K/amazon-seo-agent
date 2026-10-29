@@ -52,7 +52,7 @@ def load_config(path: Path = ROOT / "config.yaml") -> dict:
 
 def parse_list(text) -> list:
     out, seen = [], set()
-    for k in re.split(r"[;|\n]", text or ""):
+    for k in re.split(r"[;|,\n]", text or ""):
         k = re.sub(r"\s+", " ", k.strip().lower())
         if k and k not in seen:
             seen.add(k)
@@ -60,24 +60,71 @@ def parse_list(text) -> list:
     return out
 
 
+COLUMNS = ["file", "focus_keyword", "secondary_keywords", "semantic_keywords", "power_word"]
+EXT_ORDER = {".docx": 0, ".html": 1, ".htm": 1, ".md": 2, ".markdown": 2, ".txt": 3}
+
+
+def _norm_col(h: str) -> str:
+    return re.sub(r"[\s-]+", "_", h.strip().strip("\"'").lower())
+
+
 def load_jobs(root: Path = ROOT) -> list:
-    """jobs.csv: file,focus_keyword,secondary_keywords,semantic_keywords,power_word  (lists separated by ;)"""
+    """jobs.csv. Columns: file, focus_keyword, secondary_keywords, semantic_keywords, power_word.
+
+    Accepted styles (spreadsheets in some regions save CSV with semicolons):
+      * comma columns:      01_article_1,seals gaps,foam seal; draft blocker,cold air
+      * semicolon columns:  01_article_1;seals gaps;keep your house warm;removable under door seal
+    Values map to the columns in order. A header row is optional-looking but must name the columns; the file name may omit its extension.
+    A row with MORE values than there are columns is refused with an explanation instead of being misread."""
     jobs = []
     f = root / "jobs.csv"
     if f.exists():
-        with open(f, newline="", encoding="utf-8-sig") as fh:
-            for r in csv.DictReader(fh):
-                name = (r.get("file") or "").strip()
-                if name:
-                    jobs.append({"file": name, "focus_keyword": (r.get("focus_keyword") or "").strip().lower(),
-                                 "secondary": parse_list(r.get("secondary_keywords")), "semantic": parse_list(r.get("semantic_keywords")),
-                                 "power_word": (r.get("power_word") or "").strip()})
+        lines = [l for l in f.read_text(encoding="utf-8-sig").splitlines() if l.strip()]
+        header = [_norm_col(h) for h in re.split(r"[;,\t]", lines[0])] if lines else []
+        if header and "file" not in header:                      # no header line: treat every line as a job, columns in the usual order
+            header, data = list(COLUMNS), list(enumerate(lines, start=1))
+        else:
+            data = list(enumerate(lines[1:], start=2))
+        for n, line in data:
+            row = next(csv.reader([line]))
+            if len(row) == 1 and ";" in row[0]:                  # semicolon-style row under a comma header (or the reverse)
+                row = next(csv.reader([row[0]], delimiter=";"))
+            if len(row) > len(header):
+                jobs.append({"file": (row[0].strip() or f"line {n}"), "error": (
+                    f"jobs.csv line {n} has {len(row)} values but the header has {len(header)} columns. "
+                    "Use one value per column: file, focus_keyword, secondary_keywords, semantic_keywords, power_word. "
+                    "If one column holds several keywords, separate them with | (or put the cell in double quotes when you use commas).")})
+                continue
+            r = dict(zip(header, row + [""] * (len(header) - len(row))))
+            name = (r.get("file") or "").strip().strip("\"'")
+            if name:
+                jobs.append({"file": name, "focus_keyword": (r.get("focus_keyword") or "").strip().lower(),
+                             "secondary": parse_list(r.get("secondary_keywords")), "semantic": parse_list(r.get("semantic_keywords")),
+                             "power_word": (r.get("power_word") or "").strip()})
     if not jobs:
         art = root / "articles"
         if art.exists():
             jobs = [{"file": p.name, "focus_keyword": "", "secondary": [], "semantic": [], "power_word": ""}
                     for p in sorted(art.iterdir()) if p.suffix.lower() in SUPPORTED and not p.name.startswith(("~$", "."))]
     return jobs
+
+
+def resolve_article(root: Path, name: str):
+    """Find the article file. The extension may be left out, and the case may differ. Returns (path or None, hint)."""
+    d = root / "articles"
+    files = [x for x in d.iterdir() if x.is_file() and x.suffix.lower() in SUPPORTED and not x.name.startswith(("~$", "."))] if d.exists() else []
+    if (d / name).is_file():
+        return d / name, ""
+    low = name.lower()
+    exact = [x for x in files if x.name.lower() == low]
+    if exact:
+        return exact[0], ""
+    stem = Path(name).stem.lower() if Path(name).suffix.lower() in SUPPORTED else low
+    cand = sorted((x for x in files if x.stem.lower() == stem), key=lambda x: EXT_ORDER[x.suffix.lower()])
+    if cand:
+        return cand[0], ""
+    have = ", ".join(sorted(x.name for x in files)) or "(the folder is empty)"
+    return None, f"'{name}' was not found in articles/. Files there: {have}"
 
 
 def heading_changes(document) -> list:
@@ -100,9 +147,11 @@ def density_of(article, kw: dict) -> float:
 
 def process_article(job: dict, cfg: dict, root: Path, out_base: Path, today: str) -> dict:
     name = job["file"]
-    path = root / "articles" / name
-    if not path.exists():
-        return {"file": name, "status": "failed: file not found in articles/"}
+    if job.get("error"):
+        return {"file": name, "status": "failed: " + job["error"]}
+    path, hint = resolve_article(root, name)
+    if path is None:
+        return {"file": name, "status": "failed: " + hint}
     if not job["focus_keyword"]:
         return {"file": name, "status": "failed: put the focus_keyword for this article in jobs.csv"}
     try:

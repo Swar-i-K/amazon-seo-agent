@@ -12,17 +12,22 @@ Takes an article you **already have** and gives you back an **optimized copy**:
 Your original file is never changed. Nothing is published.
 
 ## Input: `jobs.csv`
+One line per article. The columns, in this order:
 ```
 file,focus_keyword,secondary_keywords,semantic_keywords,power_word
-01_Draft_Stoppers.docx,door draft stopper,foam door seal; draft blocker for renters,cold air; uneven floor; renter friendly,Proven
+01_Draft_Stoppers,door draft stopper,foam door seal | draft blocker for renters,cold air | uneven floor,Proven
 ```
 | Column | Meaning |
 |---|---|
-| `file` | the article in `articles/` (`.docx`, `.html`, `.md` or `.txt`) |
+| `file` | the article in `articles/`. The extension may be left out (`01_article_1` finds `01_article_1.docx`) |
 | `focus_keyword` | **required**. The one keyword the article ranks for |
-| `secondary_keywords` | 2-3 primary/secondary keywords, separated by `;`. Rank Math allows 5 keywords in total (focus + up to 4) |
-| `semantic_keywords` | a few related phrases, separated by `;`. Worked into the text and headings, not entered in Rank Math |
+| `secondary_keywords` | 2-3 primary/secondary keywords. Rank Math allows 5 keywords in total (focus + up to 4) |
+| `semantic_keywords` | a few related phrases. Worked into the text and headings, not entered in Rank Math |
 | `power_word` | optional word that must appear in the SEO title (for example Proven, Ultimate). Left blank, the agent picks one |
+
+**Both styles work:** columns separated by commas (above) or by semicolons, as many spreadsheets save them:
+`01_article_1;seals gaps;keep your house warm;removable under door seal` is file; focus; secondary; semantic. Use one style per line.
+When one column holds several keywords, separate them with `|` (or put the cell in double quotes and use commas). A row with more values than columns is refused with an explanation, and GitHub shows the same mistake as "row 2 should actually have N columns".
 
 If you leave secondary or semantic keywords blank, the agent suggests some from your article and marks them "suggested: confirm".
 
